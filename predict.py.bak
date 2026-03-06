@@ -640,8 +640,8 @@ def main():
     parser.add_argument("--out", required=True,
                         help="Output annotated VCF path")
     parser.add_argument("--chroms", nargs="+",
-                        default=["chr20"],
-                        help="Chromosomes to run inference on (default: chr20)")
+                        default=[f"chr{i}" for i in range(1, 19)],
+                        help="Chromosomes to process (default: chr1-chr18)")
     parser.add_argument("--workers", type=int, default=0,
                         help="Parallel workers (default: auto)")
     args = parser.parse_args()

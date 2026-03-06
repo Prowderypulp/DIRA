@@ -83,16 +83,18 @@ def run(features_path, vcf_path, model_dir, out_vcf):
     df = pd.read_csv(features_path)
 
     # Align column names between extractor versions
-    rename_map = {
-        "read_end_dist_mean": "read_pos_mean",
-        "read_end_dist_var": "read_pos_var",
-    }
-    df.rename(columns=rename_map, inplace=True)
+    # Model expects both read_pos_* and read_end_dist_* as separate features
+    if "read_pos_mean" not in df.columns and "read_end_dist_mean" in df.columns:
+        df["read_pos_mean"] = df["read_end_dist_mean"]
+    if "read_pos_var" not in df.columns and "read_end_dist_var" in df.columns:
+        df["read_pos_var"] = df["read_end_dist_var"]
 
-    # Drop columns not used by model
-    drop_cols = [c for c in df.columns if c not in feature_names and c not in ["chrom", "pos", "ref", "alt"]]
-    if drop_cols:
-        log.info(f"Dropping unused columns: {drop_cols}")
+    # Check all required features exist
+    missing = [f for f in feature_names if f not in df.columns]
+    if missing:
+        log.error(f"Missing features in CSV: {missing}")
+        log.error(f"CSV columns: {list(df.columns)}")
+        raise KeyError(f"Missing features: {missing}")
 
     log.info(f"{len(df):,} indels loaded")
 
