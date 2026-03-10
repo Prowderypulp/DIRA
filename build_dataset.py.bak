@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""
+DIRA — Dataset Builder v3 (vcfeval-based labeling)
+====================================================
+Uses RTG vcfeval to match candidates to truth, instead of exact
+(chrom, pos, ref, alt) tuple matching. This handles representation
+differences in indels (left-alignment ambiguity, different but
+equivalent representations in repetitive regions).
+
+vcfeval produces tp.vcf.gz (true positives from the call set) and
+fp.vcf.gz (false positives). We parse these to assign labels.
+
+Optionally filters to GIAB high-confidence regions.
+
+Usage:
+    python dataset_v3.py \
+        --features   train_features_v5.csv \
+        --vcf        HG002_indels.norm.vcf.gz \
+        --truth      HG002_truth.norm.vcf.gz \
+        --sdf        GRCh38.sdf \
+        --out        train_dataset_v5.parquet \
+        [--bed       HG002_confident.bed] \
+        [--rtg       /path/to/rtg]
+"""
+
+import argparse
+import logging
+import os
+import subprocess
+import tempfile
+import shutil
+
+import pandas as pd
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("dira.dataset")
+
+
+def run_vcfeval(candidate_vcf, truth_vcf, sdf_path, out_dir,
+                bed_path=None, rtg_cmd="rtg"):
+    """
+    Run RTG vcfeval and return the output directory.
+    """
+    cmd = [
+        rtg_cmd, "vcfeval",
+        "-b", truth_vcf,
+        "-c", candidate_vcf,
+        "-t", sdf_path,
+        "-o", out_dir,
+        "--squash-ploidy",    # treat all as haploid for indel matching
+    ]
+
+    if bed_path:
+        cmd.extend(["--bed-regions", bed_path])
+
+    log.info(f"Running: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        log.error(f"vcfeval failed:\n{result.stderr}")
+        raise RuntimeError(f"vcfeval failed with return code {result.returncode}")
+
+    log.info(f"vcfeval output:\n{result.stdout}")
+    return out_dir
+
+
+def parse_vcfeval_output(eval_dir):
+    """
+    Parse vcfeval output to build sets of TP and FP variant keys.
+
+    vcfeval produces:
+      - tp.vcf.gz: true positive calls (matched to truth)
+      - fp.vcf.gz: false positive calls (not matched)
+
+    We extract (chrom, pos, ref, alt) from each.
+    Returns (tp_set, fp_set).
+    """
+    from cyvcf2 import VCF
+
+    tp_set = set()
+    fp_set = set()
+
+    # Parse TPs from call set
+    tp_path = os.path.join(eval_dir, "tp.vcf.gz")
+    if os.path.exists(tp_path):
+        vcf = VCF(tp_path)
+        for v in vcf:
+            for alt in v.ALT:
+                if len(v.REF) != len(alt):  # indels only
+                    tp_set.add((v.CHROM, v.POS, v.REF, alt))
+        vcf.close()
+        log.info(f"Parsed {len(tp_set):,} TPs from tp.vcf.gz")
+
+    # Parse FPs
+    fp_path = os.path.join(eval_dir, "fp.vcf.gz")
+    if os.path.exists(fp_path):
+        vcf = VCF(fp_path)
+        for v in vcf:
+            for alt in v.ALT:
+                if len(v.REF) != len(alt):
+                    fp_set.add((v.CHROM, v.POS, v.REF, alt))
+        vcf.close()
+        log.info(f"Parsed {len(fp_set):,} FPs from fp.vcf.gz")
+
+    return tp_set, fp_set
+
+
+def build_dataset(features_path, candidate_vcf, truth_vcf, sdf_path,
+                  out_path, bed_path=None, rtg_cmd="rtg"):
+
+    # Step 1: Run vcfeval
+    tmp_dir = tempfile.mkdtemp(prefix="dira_vcfeval_")
+    eval_dir = os.path.join(tmp_dir, "eval")
+
+    try:
+        run_vcfeval(candidate_vcf, truth_vcf, sdf_path, eval_dir,
+                    bed_path=bed_path, rtg_cmd=rtg_cmd)
+
+        # Step 2: Parse TP/FP sets
+        tp_set, fp_set = parse_vcfeval_output(eval_dir)
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # Step 3: Load features and assign labels
+    log.info(f"Loading features: {features_path}")
+    df = pd.read_csv(features_path)
+    log.info(f"Features loaded: {len(df):,} rows")
+
+    labels = []
+    n_tp = n_fp = n_unlabeled = 0
+
+    for row in df.itertuples(index=False):
+        key = (str(row.chrom), int(row.pos), str(row.ref), str(row.alt))
+
+        if key in tp_set:
+            labels.append(1)
+            n_tp += 1
+        elif key in fp_set:
+            labels.append(0)
+            n_fp += 1
+        else:
+            # Variant not in vcfeval output — could be outside confidence
+            # regions, or a SNP that slipped through. Label as FP by default,
+            # or drop if using confidence regions.
+            if bed_path:
+                # If we used confidence regions, unlabeled = outside regions
+                # Drop these — uncertain labels
+                labels.append(-1)
+                n_unlabeled += 1
+            else:
+                # No confidence regions — treat as FP
+                labels.append(0)
+                n_fp += 1
+
+    df["label"] = labels
+
+    # Drop unlabeled rows if using confidence regions
+    if bed_path and n_unlabeled > 0:
+        before = len(df)
+        df = df[df["label"] >= 0].copy()
+        log.info(f"Dropped {before - len(df):,} variants outside confidence regions")
+
+    log.info(f"Labels assigned: TP={n_tp:,}  FP={n_fp:,}  Dropped={n_unlabeled:,}")
+    log.info(f"Class ratio (neg/pos) = {n_fp / max(n_tp, 1):.3f}")
+
+    # Step 4: Save
+    if out_path.endswith(".parquet"):
+        df.to_parquet(out_path, index=False)
+    else:
+        df.to_csv(out_path, index=False)
+
+    log.info(f"Saved → {out_path}  ({len(df):,} rows)")
+    return df
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="DIRA dataset builder v3 (vcfeval-based labeling)")
+    parser.add_argument("--features", required=True,
+                        help="Pre-extracted features CSV")
+    parser.add_argument("--vcf", required=True,
+                        help="Candidate indel VCF (bgzipped + tabix-indexed)")
+    parser.add_argument("--truth", required=True,
+                        help="Truth VCF (bgzipped + tabix-indexed)")
+    parser.add_argument("--sdf", required=True,
+                        help="RTG SDF reference directory")
+    parser.add_argument("--out", required=True,
+                        help="Output dataset (.parquet or .csv)")
+    parser.add_argument("--bed", default=None,
+                        help="GIAB high-confidence BED regions (optional)")
+    parser.add_argument("--rtg", default="rtg",
+                        help="Path to rtg binary (default: rtg)")
+    args = parser.parse_args()
+
+    build_dataset(
+        features_path=args.features,
+        candidate_vcf=args.vcf,
+        truth_vcf=args.truth,
+        sdf_path=args.sdf,
+        out_path=args.out,
+        bed_path=args.bed,
+        rtg_cmd=args.rtg,
+    )
+
+
+if __name__ == "__main__":
+    main()

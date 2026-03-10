@@ -1,0 +1,28 @@
+edbergstefan2@instance-20260303-144905:~/rtg-tools-3.12$ python3 ~/DIRA/scripts/predict_dira_v3.py     --features ~/DIRA/features/HG003_freebayes_features_v5.csv     --vcf ~/DIRA/results/HG003_freebayes_norm.vcf.gz     --m
+odel ~/DIRA/models_v6_final     --out ~/DIRA/results/HG003_dira_freebayes.vcf
+23:27:18  INFO      Model: 46 features, τ=0.3663
+23:27:18  INFO      Loading features: /home/edbergstefan2/DIRA/features/HG003_freebayes_features_v5.csv
+23:27:24  INFO      791,508 indels loaded
+23:28:28  INFO      Predictions done
+23:29:18  INFO      PASS=500,723  FILTERED=290,785  NO_MATCH=80,325
+23:29:18  INFO      Output → /home/edbergstefan2/DIRA/results/HG003_dira_freebayes.vcf
+edbergstefan2@instance-20260303-144905:~/rtg-tools-3.12$ bgzip /home/edbergstefan2/DIRA/results/HG003_dira_freebayes.vcf
+edbergstefan2@instance-20260303-144905:~/rtg-tools-3.12$ tabix -p vcf /home/edbergstefan2/DIRA/results/HG003_dira_freebayes.vcf.gz
+edbergstefan2@instance-20260303-144905:~/rtg-tools-3.12$ ./rtg vcfeval     -b /data/truth/HG003_indels.norm.vcf
+.gz     -c ~/DIRA/results/HG003_dira_freebayes.vcf.gz   -t ../GRCh38.sdf     -o ~/DIRA/eval/HG003_dira_v7_freeb
+ayes
+There were 19 problematic baseline variants skipped during loading (see vcfeval.log for details).
+There were 503356 variants not thresholded in ROC data files due to missing or invalid GQ (FORMAT) values.
+Could not select maximized F-measure threshold from ROC data, only un-thresholded statistics will be shown. Consider selecting a different scoring attribute with --vcf-score-field
+Threshold  True-pos-baseline  True-pos-call  False-pos  False-neg  Precision  Sensitivity  F-measure
+----------------------------------------------------------------------------------------------------
+     None             247814         247531     255825     340215     0.4918       0.4214     0.4539
+
+edbergstefan2@instance-20260303-144905:~/rtg-tools-3.12$ ./rtg vcfeval     -b /data/truth/HG003_indels.norm.vcf.gz     -c ~/DIRA/results/HG003_freebayes_norm.vcf.gz   -t ../GRCh38.sdf     -o ~/DIRA/eval/HG003_v7_freebayes
+There were 19 problematic baseline variants skipped during loading (see vcfeval.log for details).
+There were 763716 variants not thresholded in ROC data files due to missing or invalid GQ (FORMAT) values.
+Could not select maximized F-measure threshold from ROC data, only un-thresholded statistics will be shown. Consider selecting a different scoring attribute with --vcf-score-field
+Threshold  True-pos-baseline  True-pos-call  False-pos  False-neg  Precision  Sensitivity  F-measure
+----------------------------------------------------------------------------------------------------
+     None             280711         279776     483940     307318     0.3663       0.4774     0.4145
+
