@@ -1,0 +1,152 @@
+//! FeatureRow: matches v6's CSV header exactly (same 46 features, same order).
+
+#[derive(Debug)]
+pub struct FeatureRow {
+    pub chrom: String,
+    pub pos: i64,
+    pub ref_allele: String,
+    pub alt_allele: String,
+    pub allele_balance: f64,
+    pub total_depth: i64,
+    pub alt_depth: i64,
+    pub mq_mean_alt: f64,
+    pub mq_var_alt: f64,
+    pub mq_mean_ref: f64,
+    pub strand_ratio_alt: f64,
+    pub strand_ratio_ref: f64,
+    pub read_end_dist_mean: f64,
+    pub read_end_dist_var: f64,
+    pub softclip_rate_alt: f64,
+    pub bq_mean_alt: f64,
+    pub bq_var_alt: f64,
+    pub bq_mean_ref: f64,
+    pub nbq_alt: f64,
+    pub nbq_ref: f64,
+    pub bq_drop_alt: f64,
+    pub indel_length: i64,
+    pub is_insertion: i64,
+    pub insert_entropy: f64,
+    pub homopolymer_length: i64,
+    pub gc_content_50bp: f64,
+    pub udp_dp_ratio: f64,
+    pub pileup_entropy: f64,
+    pub nm_mean_alt: f64,
+    pub nm_mean_ref: f64,
+    pub proper_pair_rate_alt: f64,
+    pub proper_pair_rate_ref: f64,
+    pub mismatch_rate_alt: f64,
+    pub cigar_agreement: f64,
+    pub haplotype_entropy: f64,
+    pub fragment_support_rate: f64,
+    pub read_end_dist_mean_alt: f64,
+    pub read_end_dist_mean_ref: f64,
+    pub softclip_rate_ref: f64,
+    pub softclip_diff: f64,
+    pub isize_mean_alt: f64,
+    pub isize_mean_ref: f64,
+    pub isize_dev: f64,
+    pub flank_bq_alt: f64,
+    pub flank_bq_ref: f64,
+    pub true_mismatch_rate_alt: f64,
+    pub tandem_repeat_unit: i64,
+    pub tandem_repeat_length: i64,
+    pub mq0_fraction: f64,
+    pub mq_diff: f64,
+}
+
+pub const HEADER: &[&str] = &[
+    "chrom", "pos", "ref", "alt",
+    "allele_balance", "total_depth", "alt_depth",
+    "mq_mean_alt", "mq_var_alt", "mq_mean_ref",
+    "strand_ratio_alt", "strand_ratio_ref",
+    "read_end_dist_mean", "read_end_dist_var",
+    "softclip_rate_alt",
+    "bq_mean_alt", "bq_var_alt", "bq_mean_ref",
+    "nbq_alt", "nbq_ref",
+    "bq_drop_alt",
+    "indel_length", "is_insertion", "insert_entropy",
+    "homopolymer_length", "gc_content_50bp",
+    "udp_dp_ratio",
+    "pileup_entropy",
+    "nm_mean_alt", "nm_mean_ref",
+    "proper_pair_rate_alt", "proper_pair_rate_ref",
+    "mismatch_rate_alt",
+    "cigar_agreement", "haplotype_entropy", "fragment_support_rate",
+    "read_end_dist_mean_alt", "read_end_dist_mean_ref",
+    "softclip_rate_ref", "softclip_diff",
+    "isize_mean_alt", "isize_mean_ref", "isize_dev",
+    "flank_bq_alt", "flank_bq_ref", "true_mismatch_rate_alt",
+    "tandem_repeat_unit", "tandem_repeat_length",
+    "mq0_fraction", "mq_diff",
+];
+
+impl FeatureRow {
+    pub fn to_record(&self) -> Vec<String> {
+        // Match v6 CSV formatting: chrom/pos/ref/alt as strings, then floats/ints.
+        // Python csv.writer prints floats with str() (e.g. "0.5", "12.345678").
+        // Rust's default Display for f64 is mostly compatible but may differ in trailing zeros.
+        // For training/eval this is harmless; pandas parses both identically.
+        vec![
+            self.chrom.clone(),
+            self.pos.to_string(),
+            self.ref_allele.clone(),
+            self.alt_allele.clone(),
+            fmt_f(self.allele_balance),
+            self.total_depth.to_string(),
+            self.alt_depth.to_string(),
+            fmt_f(self.mq_mean_alt),
+            fmt_f(self.mq_var_alt),
+            fmt_f(self.mq_mean_ref),
+            fmt_f(self.strand_ratio_alt),
+            fmt_f(self.strand_ratio_ref),
+            fmt_f(self.read_end_dist_mean),
+            fmt_f(self.read_end_dist_var),
+            fmt_f(self.softclip_rate_alt),
+            fmt_f(self.bq_mean_alt),
+            fmt_f(self.bq_var_alt),
+            fmt_f(self.bq_mean_ref),
+            fmt_f(self.nbq_alt),
+            fmt_f(self.nbq_ref),
+            fmt_f(self.bq_drop_alt),
+            self.indel_length.to_string(),
+            self.is_insertion.to_string(),
+            fmt_f(self.insert_entropy),
+            self.homopolymer_length.to_string(),
+            fmt_f(self.gc_content_50bp),
+            fmt_f(self.udp_dp_ratio),
+            fmt_f(self.pileup_entropy),
+            fmt_f(self.nm_mean_alt),
+            fmt_f(self.nm_mean_ref),
+            fmt_f(self.proper_pair_rate_alt),
+            fmt_f(self.proper_pair_rate_ref),
+            fmt_f(self.mismatch_rate_alt),
+            fmt_f(self.cigar_agreement),
+            fmt_f(self.haplotype_entropy),
+            fmt_f(self.fragment_support_rate),
+            fmt_f(self.read_end_dist_mean_alt),
+            fmt_f(self.read_end_dist_mean_ref),
+            fmt_f(self.softclip_rate_ref),
+            fmt_f(self.softclip_diff),
+            fmt_f(self.isize_mean_alt),
+            fmt_f(self.isize_mean_ref),
+            fmt_f(self.isize_dev),
+            fmt_f(self.flank_bq_alt),
+            fmt_f(self.flank_bq_ref),
+            fmt_f(self.true_mismatch_rate_alt),
+            self.tandem_repeat_unit.to_string(),
+            self.tandem_repeat_length.to_string(),
+            fmt_f(self.mq0_fraction),
+            fmt_f(self.mq_diff),
+        ]
+    }
+}
+
+fn fmt_f(x: f64) -> String {
+    // Mimic Python's default repr for floats reasonably closely.
+    // Pandas/LightGBM don't care about trailing zeros, so this is just for diffability.
+    if x == x.trunc() && x.abs() < 1e16 {
+        format!("{:.1}", x)
+    } else {
+        format!("{}", x)
+    }
+}
