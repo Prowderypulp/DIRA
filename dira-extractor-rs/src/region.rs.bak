@@ -1,5 +1,6 @@
-//! Per-region worker. BAM/VCF/FASTA handles are passed in (opened once per
-//! thread by the caller) to avoid repeated file open + index load cost.
+//! Per-region worker: opens BAM/VCF/FASTA handles once, processes all indels
+//! in the region. This is the key win over Python — handles are reused across
+//! many sites within a region.
 
 use anyhow::{Context, Result};
 use rust_htslib::bam::{IndexedReader as BamReader, Read as BamRead, Record};
@@ -16,19 +17,26 @@ pub struct Region {
     pub end: u64,    // 1-based inclusive
 }
 
-/// Process one region using already-opened handles.
 pub fn process_region(
     region: &Region,
-    bam: &mut BamReader,
-    vcf: &mut BcfReader,
-    fa: &FaReader,
+    bam_path: &str,
+    vcf_path: &str,
+    ref_path: &str,
 ) -> Result<Vec<FeatureRow>> {
+    let mut bam = BamReader::from_path(bam_path)
+        .with_context(|| format!("opening BAM {}", bam_path))?;
+    let mut vcf = BcfReader::from_path(vcf_path)
+        .with_context(|| format!("opening VCF {}", vcf_path))?;
+    let fa = FaReader::from_path(ref_path)
+        .with_context(|| format!("opening FASTA {}", ref_path))?;
+
     let header = vcf.header().clone();
     let rid = match header.name2rid(region.chrom.as_bytes()) {
         Ok(r) => r,
-        Err(_) => return Ok(vec![]),
+        Err(_) => return Ok(vec![]),  // chrom not in VCF
     };
 
+    // BCF coords are 0-based; region is 1-based inclusive.
     vcf.fetch(rid, region.start - 1, Some(region.end))?;
 
     let mut rows: Vec<FeatureRow> = Vec::new();
@@ -36,7 +44,7 @@ pub fn process_region(
 
     while let Some(r) = vcf.read(&mut record) {
         r?;
-        let pos = record.pos() + 1;
+        let pos = record.pos() + 1; // back to 1-based
         if (pos as u64) < region.start || (pos as u64) > region.end {
             continue;
         }
@@ -48,6 +56,7 @@ pub fn process_region(
         let ref_allele = std::str::from_utf8(alleles[0])?.to_string();
         let alt_allele = std::str::from_utf8(alleles[1])?.to_string();
 
+        // Indel only.
         if ref_allele.len() == alt_allele.len() {
             continue;
         }
@@ -58,8 +67,16 @@ pub fn process_region(
         let indel_length_abs = indel_length.abs();
 
         if let Some(row) = process_site(
-            bam, fa, &region.chrom, pos, pos0,
-            ref_allele, alt_allele, is_insertion, indel_length, indel_length_abs,
+            &mut bam,
+            &fa,
+            &region.chrom,
+            pos,
+            pos0,
+            ref_allele,
+            alt_allele,
+            is_insertion,
+            indel_length,
+            indel_length_abs,
         )? {
             rows.push(row);
         }
@@ -83,9 +100,9 @@ fn process_site(
 ) -> Result<Option<FeatureRow>> {
     let fetch_start = std::cmp::max(0, pos0 - 1);
     let fetch_end = pos0 + 2;
-    bam.fetch((chrom, fetch_start, fetch_end))
-        .with_context(|| format!("bam fetch {}:{}-{}", chrom, fetch_start, fetch_end))?;
+    bam.fetch((chrom, fetch_start, fetch_end))?;
 
+    // Collect overlapping reads + cache aligned pairs.
     let mut all_records: Vec<Record> = Vec::new();
     let mut all_pairs: Vec<AlignedPairs> = Vec::new();
     let mut alt_indices: HashSet<usize> = HashSet::new();
@@ -98,6 +115,8 @@ fn process_site(
             continue;
         }
         let read_start = rec.pos();
+        // pysam: read.reference_start > pos0 OR read.reference_end <= pos0 -> skip
+        // rust-htslib: cigar.end_pos() gives reference end (1-past-last).
         let cigar = rec.cigar();
         let read_end = cigar.end_pos();
         if read_start > pos0 || read_end <= pos0 {
@@ -127,6 +146,7 @@ fn process_site(
     let ref_depth = depth - alt_depth;
     let allele_balance = alt_depth as f64 / depth as f64;
 
+    // ── Pre-fetch flanking ref sequence (single fetch per site) ──────────
     let flank_lo = std::cmp::max(0, pos0 - 5) as usize;
     let flank_hi = (pos0 + 5) as usize;
     let flank_seq: Vec<u8> = fa
@@ -135,6 +155,7 @@ fn process_site(
         .unwrap_or_default();
     let flank_offset = flank_lo as i64;
 
+    // ── Reference context window for homopolymer + GC + tandem repeat ────
     let ctx_start = std::cmp::max(0, pos0 - 50) as usize;
     let ctx_end = (pos0 + 50 - 1) as usize;
     let ctx_seq: Vec<u8> = fa
@@ -143,6 +164,7 @@ fn process_site(
         .unwrap_or_default();
     let (gc, homopoly, tr_unit, tr_length) = compute_context(&ctx_seq, pos0 - ctx_start as i64);
 
+    // ── Per-read scalar stats ────────────────────────────────────────────
     let mut mq_alt: Vec<f64> = Vec::with_capacity(alt_depth);
     let mut mq_ref: Vec<f64> = Vec::with_capacity(ref_depth);
     let mut bq_alt: Vec<f64> = Vec::with_capacity(alt_depth);
@@ -175,8 +197,12 @@ fn process_site(
 
     for (i, r) in all_records.iter().enumerate() {
         let mq = r.mapq() as f64;
-        if r.mapq() == 0 { mq0_count += 1; }
-        if r.mapq() >= 20 { dp_mq20 += 1; }
+        if r.mapq() == 0 {
+            mq0_count += 1;
+        }
+        if r.mapq() >= 20 {
+            dp_mq20 += 1;
+        }
         let quals = r.qual();
         let seq_len = r.seq_len();
         let bq_mean = if quals.is_empty() {
@@ -200,6 +226,7 @@ fn process_site(
 
         let sc = softclip_total(&r.cigar()) as f64;
 
+        // NBQ + read-end distance (uses cached pairs)
         let pairs = &all_pairs[i];
         let qpos_at_site = pairs.qpos_at(pos0);
         let nbq = compute_nbq(quals, &pairs.pairs, pos0, 5);
@@ -210,6 +237,7 @@ fn process_site(
         };
         ed_all.push(ed);
 
+        // Pileup base at site
         if let Some(qp) = qpos_at_site {
             let seq = r.seq();
             if qp < seq_len {
@@ -217,13 +245,18 @@ fn process_site(
             }
         }
 
+        // Flanking BQ (uses cached pairs + pre-fetched ref seq)
         let (fbq, mm, al) = flanking_bq(quals, &r.seq().as_bytes(), &pairs.pairs,
                                         pos0, &flank_seq, flank_offset, 5);
 
         let is_alt = alt_indices.contains(&i);
         if is_alt {
-            mq_alt.push(mq); bq_alt.push(bq_mean); nm_alt.push(nm); sc_alt.push(sc);
-            nbq_alt.push(nbq); ed_alt.push(ed);
+            mq_alt.push(mq);
+            bq_alt.push(bq_mean);
+            nm_alt.push(nm);
+            sc_alt.push(sc);
+            nbq_alt.push(nbq);
+            ed_alt.push(ed);
             if !r.is_reverse() { strand_alt_fwd += 1; }
             if r.is_proper_pair() { pp_alt += 1; }
             if r.is_proper_pair() && r.insert_size() != 0 {
@@ -233,12 +266,17 @@ fn process_site(
             flank_mm_total += mm;
             flank_al_total += al;
             alt_sigs.push(cigar_signature(&r.cigar(), r.pos(), pos0, 3));
+            // Fragment support: mate also in alt set?
             if r.is_paired() && !r.is_mate_unmapped() && alt_qnames.contains(r.qname()) {
                 frag_support += 1;
             }
         } else {
-            mq_ref.push(mq); bq_ref.push(bq_mean); nm_ref.push(nm); sc_ref.push(sc);
-            nbq_ref.push(nbq); ed_ref.push(ed);
+            mq_ref.push(mq);
+            bq_ref.push(bq_mean);
+            nm_ref.push(nm);
+            sc_ref.push(sc);
+            nbq_ref.push(nbq);
+            ed_ref.push(ed);
             if !r.is_reverse() { strand_ref_fwd += 1; }
             if r.is_proper_pair() { pp_ref += 1; }
             if r.is_proper_pair() && r.insert_size() != 0 {
@@ -283,11 +321,15 @@ fn process_site(
     let udp_dp_ratio = if dp_mq20 > 0 { depth as f64 / dp_mq20 as f64 } else { 0.0 };
     let mq0_fraction = mq0_count as f64 / depth as f64;
 
+    // Pileup entropy
     let pileup_entropy = entropy_bytes(&bases_at_site);
+
+    // Insertion sequence entropy
     let insert_entropy = if is_insertion {
         entropy_bytes(alt_allele.as_bytes())
     } else { 0.0 };
 
+    // CIGAR agreement + haplotype entropy
     let (cigar_agreement, haplotype_entropy) = if !alt_sigs.is_empty() {
         let mut counts: HashMap<&Vec<(u8, u32)>, usize> = HashMap::new();
         for s in &alt_sigs {
@@ -419,6 +461,7 @@ fn compute_context(seq: &[u8], pos_in_seq: i64) -> (f64, i64, i64, i64) {
     let ci = ci as usize;
     let center = seq[ci];
 
+    // Homopolymer
     let mut homopoly: i64 = 1;
     let mut j = ci as i64 - 1;
     while j >= 0 && seq[j as usize] == center {
@@ -429,6 +472,7 @@ fn compute_context(seq: &[u8], pos_in_seq: i64) -> (f64, i64, i64, i64) {
         homopoly += 1; j += 1;
     }
 
+    // Tandem repeat
     let (tr_unit, tr_length) = find_tandem_repeat(seq, ci, 6);
     (gc, homopoly, tr_unit, tr_length)
 }
