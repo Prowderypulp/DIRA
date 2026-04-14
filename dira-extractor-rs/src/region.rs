@@ -289,7 +289,6 @@ fn compute_site_features(
         let sc = softclip_total(&r.cigar()) as f64;
 
         let qpos_at_site = pairs.qpos_at(site.pos0);
-        // NBQ window uses 1-based pos to match Python v6 semantics (off-by-one).
         let nbq = compute_nbq(quals, &pairs.pairs, site.pos, 5);
         let rlen = if seq_len > 0 { seq_len } else { 150 };
         let ed = match qpos_at_site {
@@ -545,4 +544,4 @@ fn find_tandem_repeat(seq: &[u8], pos: usize, max_unit: usize) -> (i64, i64) {
         }
     }
     (best_unit, best_total)
-
+}
