@@ -67,9 +67,9 @@ def chrom_split(df, val_chroms=None, test_chroms=None):
     Defaults: test=chr17,chr18  val=chr15,chr16  train=rest
     """
     if test_chroms is None:
-        test_chroms = {"chr17", "chr18"}
+        test_chroms = {"chr20"}
     if val_chroms is None:
-        val_chroms = {"chr15", "chr16"}
+        val_chroms = {"chr19"}
 
     mask_test = df["chrom"].isin(test_chroms)
     mask_val = df["chrom"].isin(val_chroms)
