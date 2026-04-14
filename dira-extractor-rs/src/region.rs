@@ -157,19 +157,7 @@ pub fn process_region(
             if !pull_next(bam, &mut next_read, &mut bam_exhausted)? {
                 next_read_ready = false;
                 break;
-            }
-        }
-
-        // (b) Evict reads that no longer overlap site.pos0.
-        while let Some(front) = buffer.front() {
-            if front.read_end <= site.pos0 {
-                buffer.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        // (c) Also filter: read.reference_start > pos0 — skip from front scan.
+        buffer.retain(|br| br.read_end > site.pos0);
         // With VCF sorted and reads position-sorted, any read in the buffer has
         // pos <= site.pos0 already (we only admitted those). But we still need
         // to exclude reads whose start is strictly > pos0 — but those can't be
